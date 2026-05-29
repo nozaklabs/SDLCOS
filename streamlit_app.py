@@ -65,15 +65,15 @@ JSON schema:
 
 CODEGEN_PROMPT = """You are the Code Generation Agent inside SDLCOS, an AI-native SDLC orchestration platform.
 Receive the architecture plan and describe the implementation.
-Respond ONLY with valid JSON — no markdown, no preamble.
-CRITICAL: All string values must be short and on a single line. No actual code — describe what each file does.
-JSON schema:
-{
-  "files_generated": ["app/models/user.py", "app/services/auth_service.py"],
-  "code_blocks": [{"filename": "app/models/user.py", "language": "python", "code": "SQLAlchemy User model with id, email, hashed_password, role, created_at fields"}],
-  "implementation_notes": ["Passwords hashed with bcrypt", "JWT tokens expire in 15 minutes"],
-  "next_steps": ["Add rate limiting", "Set up token rotation"]
-}"""
+YOUR ENTIRE RESPONSE MUST BE A SINGLE VALID JSON OBJECT. Nothing before it. Nothing after it.
+CRITICAL RULES:
+- Every string value must fit on one line
+- No newlines, tabs, or special characters inside any string value
+- No actual code inside string values — plain English descriptions only
+- No backslashes inside string values
+- No quotes of any kind inside string values
+Output exactly this structure with your own values:
+{"files_generated":["app/models/user.py","app/services/auth_service.py"],"code_blocks":[{"filename":"app/models/user.py","language":"python","code":"SQLAlchemy User model with id email hashed_password role created_at fields"}],"implementation_notes":["Passwords hashed with bcrypt","JWT tokens expire in 15 minutes"],"next_steps":["Add rate limiting","Set up token rotation"]}"""
 
 
 def parse_json_safe(raw):
@@ -114,11 +114,12 @@ def parse_json_safe(raw):
     except Exception:
         pass
 
-    # Last resort: return safe fallback structure
+    # Last resort: return safe fallback structure with raw preview for debugging
+    preview = raw[:300].replace('"', "'") if raw else "empty"
     return {
         "files_generated": ["See implementation notes"],
         "code_blocks": [{"filename": "output.py", "language": "python", "code": "Output could not be parsed. Please retry."}],
-        "implementation_notes": ["Response parsing failed. Try running the pipeline again."],
+        "implementation_notes": [f"Response parsing failed. Raw output preview: {preview}"],
         "next_steps": ["Retry the pipeline with a more specific request"]
     }
 
