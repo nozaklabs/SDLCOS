@@ -149,7 +149,10 @@ with st.sidebar:
 try:
     api_key = st.secrets["ANTHROPIC_API_KEY"]
 except Exception:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    try:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        api_key = ""
 
 if not api_key:
     st.error("API key not configured. Please add ANTHROPIC_API_KEY to Streamlit secrets.")
