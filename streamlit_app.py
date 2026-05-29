@@ -76,8 +76,13 @@ JSON schema:
 }"""
 
 
-def parse_json(raw):
+def parse_json_safe(raw):
+    if not raw:
+        return {}
+
     raw = raw.strip()
+
+    # Strip markdown fences
     if "```" in raw:
         parts = raw.split("```")
         for part in parts:
@@ -87,11 +92,35 @@ def parse_json(raw):
             elif "{" in part:
                 raw = part.strip()
                 break
+
+    # Extract outermost JSON object
     start = raw.find("{")
     end = raw.rfind("}") + 1
     if start != -1 and end > start:
         raw = raw[start:end]
-    return json.loads(raw)
+
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    # Fallback: sanitize and retry
+    try:
+        import re
+        # Remove control characters
+        raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', raw)
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    # Last resort: return safe fallback structure
+    return {
+        "files_generated": ["See implementation notes"],
+        "code_blocks": [{"filename": "output.py", "language": "python", "code": "Output could not be parsed. Please retry."}],
+        "implementation_notes": ["Response parsing failed. Try running the pipeline again."],
+        "next_steps": ["Retry the pipeline with a more specific request"]
+    }
 
 
 def run_agent(client, system_prompt, user_message):
@@ -101,7 +130,8 @@ def run_agent(client, system_prompt, user_message):
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}]
     )
-    return parse_json(response.content[0].text)
+    raw = response.content[0].text
+    return parse_json_safe(raw)
 
 
 def run_pipeline(api_key, feature_request):
