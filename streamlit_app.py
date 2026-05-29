@@ -35,6 +35,27 @@ html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
 </style>
 """, unsafe_allow_html=True)
 
+ENRICHMENT_PROMPT = """You are a Requirements Enrichment Agent inside SDLCOS, an AI-native SDLC orchestration platform.
+
+Your role: Transform any user input into a clear, structured software engineering specification.
+
+Respond ONLY with a single plain text paragraph. No JSON, no bullet points, no markdown. Under 120 words.
+
+Rules:
+- Infer the most logical technical interpretation
+- Add standard engineering context: auth, database, APIs, frontend, backend
+- Sound like a senior engineer wrote it
+- Never ask for clarification, always make reasonable assumptions
+- Specify the tech stack if mentioned, otherwise assume Python FastAPI backend and React frontend
+
+Examples:
+Input: "STK exchange social media app"
+Output: "Build a social media platform for stock market investors where users can create profiles, share trades and investment ideas, follow other traders, view real-time stock price feeds via a third-party API integration, maintain public or private portfolios, and engage in discussion threads around specific stocks. The system requires JWT authentication, a PostgreSQL database, a WebSocket layer for real-time updates, a RESTful API backend in FastAPI, and a React frontend."
+
+Input: "i want login"
+Output: "Build a secure user authentication system with email and password registration, login, logout, password reset via email, and JWT-based session management with refresh token support. Backend in FastAPI with PostgreSQL for user storage."
+"""
+
 PLANNER_PROMPT = """You are the Planner Agent inside SDLCOS, an AI-native SDLC orchestration platform.
 Analyze a feature request and produce a structured engineering breakdown.
 Respond ONLY with valid JSON — no markdown, no preamble.
@@ -64,16 +85,32 @@ JSON schema:
 }"""
 
 CODEGEN_PROMPT = """You are the Code Generation Agent inside SDLCOS, an AI-native SDLC orchestration platform.
-Receive the architecture plan and describe the implementation.
-YOUR ENTIRE RESPONSE MUST BE A SINGLE VALID JSON OBJECT. Nothing before it. Nothing after it.
-CRITICAL RULES:
-- Every string value must fit on one line
-- No newlines, tabs, or special characters inside any string value
-- No actual code inside string values — plain English descriptions only
-- No backslashes inside string values
-- No quotes of any kind inside string values
-Output exactly this structure with your own values:
-{"files_generated":["app/models/user.py","app/services/auth_service.py"],"code_blocks":[{"filename":"app/models/user.py","language":"python","code":"SQLAlchemy User model with id email hashed_password role created_at fields"}],"implementation_notes":["Passwords hashed with bcrypt","JWT tokens expire in 15 minutes"],"next_steps":["Add rate limiting","Set up token rotation"]}"""
+
+Your role: Generate real, production-ready code files based on the architecture provided.
+
+You must respond ONLY with a valid JSON object. Follow these rules strictly:
+- The "files_generated" field is a list of filename strings only
+- The "code_blocks" field contains objects with "filename", "language", and "code" fields
+- The "code" field must contain REAL code, but escape all special characters properly
+- Use single quotes inside code strings instead of double quotes to avoid JSON breaking
+- Keep each code block under 40 lines
+- The "implementation_notes" and "next_steps" are short plain string arrays, max 8 words each
+
+JSON schema to follow exactly:
+{
+  "files_generated": ["app/models/user.py"],
+  "code_blocks": [
+    {
+      "filename": "app/models/user.py",
+      "language": "python",
+      "code": "from sqlalchemy import Column, String\\nclass User(Base):\\n    id = Column(String, primary_key=True)"
+    }
+  ],
+  "implementation_notes": ["Passwords hashed with bcrypt", "JWT tokens expire in 15 minutes"],
+  "next_steps": ["Add rate limiting", "Set up token rotation"]
+}
+
+CRITICAL: Use \\n for newlines inside code strings. Never use actual newlines or unescaped double quotes inside the code field."""
 
 
 def parse_json_safe(raw):
@@ -135,6 +172,34 @@ def run_agent(client, system_prompt, user_message):
     return parse_json_safe(raw)
 
 
+def run_codegen(client, feature_request, architect_output):
+    system_prompt = """You are the Code Generation Agent inside SDLCOS. Generate production-ready code.
+
+Respond ONLY with valid JSON. Use \\n for newlines in code. Use single quotes in code, not double quotes.
+Keep each file under 40 lines. Generate 2-3 core files only.
+
+{
+  "files_generated": ["filename1.py", "filename2.py"],
+  "code_blocks": [
+    {"filename": "filename1.py", "language": "python", "code": "actual code here using \\n for newlines"}
+  ],
+  "implementation_notes": ["short note", "short note"],
+  "next_steps": ["short action", "short action"]
+}"""
+
+    user_message = f"Feature Request:\n{feature_request}\n\nArchitecture:\n{json.dumps(architect_output, indent=2)}\n\nGenerate the 2-3 most important implementation files."
+
+    response = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=3000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}]
+    )
+
+    raw = response.content[0].text.strip()
+    return parse_json_safe(raw)
+
+
 def run_pipeline(api_key, feature_request):
     client = anthropic.Anthropic(api_key=api_key)
     run_id = str(uuid.uuid4())[:8]
@@ -142,31 +207,60 @@ def run_pipeline(api_key, feature_request):
     errors = []
     planner_output = architect_output = codegen_output = None
 
+    # Enrichment Agent
     try:
-        planner_output = run_agent(client, PLANNER_PROMPT, f"Feature Request:\n\n{feature_request}")
+        enrichment_response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            system=ENRICHMENT_PROMPT,
+            messages=[{"role": "user", "content": feature_request}]
+        )
+        enriched_request = enrichment_response.content[0].text.strip()
+        logs.append("[EnrichmentAgent] ✓ Request enriched successfully")
+    except Exception as e:
+        enriched_request = feature_request
+        logs.append(f"[EnrichmentAgent] WARNING: Falling back to original input — {str(e)}")
+
+    # Planner Agent
+    try:
+        planner_output = run_agent(client, PLANNER_PROMPT, f"Feature Request:\n\n{enriched_request}")
         logs.append("[PlannerAgent] ✓ Completed successfully")
     except Exception as e:
         errors.append(f"[PlannerAgent] ERROR: {str(e)}")
 
+    # Architect Agent
     if planner_output:
         try:
-            architect_output = run_agent(client, ARCHITECT_PROMPT, f"Feature Request:\n{feature_request}\n\nEngineering Plan:\n{json.dumps(planner_output, indent=2)}")
+            architect_output = run_agent(
+                client, ARCHITECT_PROMPT,
+                f"Feature Request:\n{enriched_request}\n\nEngineering Plan:\n{json.dumps(planner_output, indent=2)}"
+            )
             logs.append("[ArchitectAgent] ✓ Completed successfully")
         except Exception as e:
             errors.append(f"[ArchitectAgent] ERROR: {str(e)}")
     else:
         errors.append("[ArchitectAgent] SKIPPED — no planner output")
 
+    # Codegen Agent
     if architect_output:
         try:
-            codegen_output = run_agent(client, CODEGEN_PROMPT, f"Feature Request:\n{feature_request}\n\nArchitecture:\n{json.dumps(architect_output, indent=2)}")
+            codegen_output = run_codegen(client, enriched_request, architect_output)
             logs.append("[CodegenAgent] ✓ Completed successfully")
         except Exception as e:
             errors.append(f"[CodegenAgent] ERROR: {str(e)}")
     else:
         errors.append("[CodegenAgent] SKIPPED — no architect output")
 
-    return {"run_id": run_id, "planner_output": planner_output, "architect_output": architect_output, "codegen_output": codegen_output, "agent_logs": logs, "errors": errors}
+    return {
+        "run_id": run_id,
+        "feature_request": feature_request,
+        "enriched_request": enriched_request,
+        "planner_output": planner_output,
+        "architect_output": architect_output,
+        "codegen_output": codegen_output,
+        "agent_logs": logs,
+        "errors": errors
+    }
 
 
 st.markdown('<div class="main-header"><h1>⚡ SDLCOS</h1><p class="tagline">AI-Native Software Development Lifecycle Orchestration System</p></div>', unsafe_allow_html=True)
