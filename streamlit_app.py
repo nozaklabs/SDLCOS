@@ -175,17 +175,32 @@ def run_agent(client, system_prompt, user_message):
 def run_codegen(client, feature_request, architect_output):
     system_prompt = """You are the Code Generation Agent inside SDLCOS. Generate production-ready code.
 
-Respond ONLY with valid JSON. Use \\n for newlines in code. Use single quotes in code, not double quotes.
-Keep each file under 40 lines. Generate 2-3 core files only.
+Respond ONLY with this exact format — no deviations:
 
-{
-  "files_generated": ["filename1.py", "filename2.py"],
-  "code_blocks": [
-    {"filename": "filename1.py", "language": "python", "code": "actual code here using \\n for newlines"}
-  ],
-  "implementation_notes": ["short note", "short note"],
-  "next_steps": ["short action", "short action"]
-}"""
+FILES: file1.py, file2.py, file3.py
+NOTE: short implementation note one
+NOTE: short implementation note two
+NEXT: next step one
+NEXT: next step two
+---
+FILENAME: file1.py
+LANGUAGE: python
+from sqlalchemy import Column, String
+class User(Base):
+    pass
+---
+FILENAME: file2.py
+LANGUAGE: python
+from fastapi import APIRouter
+router = APIRouter()
+---
+
+Rules:
+- Generate exactly 2-3 files
+- Each file under 35 lines
+- Real working code only
+- No JSON anywhere in your response
+- Separate each file with ---"""
 
     user_message = f"Feature Request:\n{feature_request}\n\nArchitecture:\n{json.dumps(architect_output, indent=2)}\n\nGenerate the 2-3 most important implementation files."
 
@@ -197,7 +212,59 @@ Keep each file under 40 lines. Generate 2-3 core files only.
     )
 
     raw = response.content[0].text.strip()
-    return parse_json_safe(raw)
+
+    # Parse the custom format
+    try:
+        result = {
+            "files_generated": [],
+            "code_blocks": [],
+            "implementation_notes": [],
+            "next_steps": []
+        }
+
+        # Extract FILES line
+        for line in raw.split("\n"):
+            if line.startswith("FILES:"):
+                result["files_generated"] = [f.strip() for f in line[6:].split(",")]
+            elif line.startswith("NOTE:"):
+                result["implementation_notes"].append(line[5:].strip())
+            elif line.startswith("NEXT:"):
+                result["next_steps"].append(line[5:].strip())
+
+        # Extract code blocks
+        blocks = raw.split("---")
+        for block in blocks:
+            block = block.strip()
+            if block.startswith("FILENAME:"):
+                lines = block.split("\n")
+                filename = lines[0].replace("FILENAME:", "").strip()
+                language = lines[1].replace("LANGUAGE:", "").strip() if len(lines) > 1 else "python"
+                code = "\n".join(lines[2:]).strip()
+                if filename and code:
+                    result["code_blocks"].append({
+                        "filename": filename,
+                        "language": language,
+                        "code": code
+                    })
+
+        if result["code_blocks"]:
+            return result
+
+        # Fallback
+        return {
+            "files_generated": ["output.py"],
+            "code_blocks": [{"filename": "output.py", "language": "python", "code": raw[:2000]}],
+            "implementation_notes": ["Generated output shown above"],
+            "next_steps": ["Review and integrate the generated code"]
+        }
+
+    except Exception:
+        return {
+            "files_generated": ["output.py"],
+            "code_blocks": [{"filename": "output.py", "language": "python", "code": raw[:2000]}],
+            "implementation_notes": ["Generated output shown above"],
+            "next_steps": ["Review and integrate the generated code"]
+        }
 
 
 def run_pipeline(api_key, feature_request):
